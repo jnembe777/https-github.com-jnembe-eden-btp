@@ -1,0 +1,198 @@
+# .github/workflows/ci.yml — EdenFin v1.1
+
+name: CI — Garde-fous EdenFin
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # ── 1. Qualité de code ─────────────────────────────────────────────
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # Pas de `cache: npm` : le dépôt utilise bun (bun.lock) et n'a pas de
+          # package-lock.json — activer le cache npm faisait échouer setup-node.
+      - name: Install
+        run: npm install --legacy-peer-deps
+      - name: Typecheck
+        run: npm run typecheck --if-present
+      - name: Lint
+        run: npm run lint --if-present
+        continue-on-error: true
+      - name: Tests
+        run: npm test --if-present -- --run
+      - name: Intégrité des tests normatifs OHADA
+        run: |
+          if [ -d tests/normatif ] && grep -rEn "\.skip\(|xdescribe|xit\(" tests/normatif/; then
+            echo "::error::Test normatif OHADA désactivé — interdit (NOYAU-NORMATIF-EDENFIN §2)"
+            exit 1
+          fi
+          echo "✅ Tests normatifs intacts"
+
+  # ── 2. Souveraineté CEMAC (pas de XOF/BCEAO/UEMOA en dur dans la LOGIQUE) ──
+  souverainete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Interdiction XOF/BCEAO/UEMOA en dur dans la logique applicative
+        run: |
+          set +e
+          # Portée : code applicatif src/ uniquement. On NE scanne PAS :
+          #  - les données de référence/seed SQL (common.currencies, plan OHADA,
+          #    seeds ONYX…) : OHADA couvre CEMAC *et* UEMOA, XOF/UEMOA y sont
+          #    légitimes ;
+          #  - les gammes multi-pays (onyx/saphir/rubis) et leurs données ;
+          #  - les fichiers de référence multi-zone explicites : mock-gammes
+          #    (données de démo multi-pays), onyx-pays (UI multi-pays),
+          #    site-footer (« CEMAC & UEMOA », texte produit), airtel.server
+          #    (devises supportées par la passerelle de paiement), tests.
+          MATCHES=$(grep -rEln "\b(BCEAO|UEMOA|XOF)\b" \
+            --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" \
+            --exclude-dir=node_modules \
+            src 2>/dev/null \
+            | grep -vE "mock-gammes|onyx-pays|site-footer|airtel\.server|\.test\.")
+          set -e
+          if [ -n "$MATCHES" ]; then
+            echo "::error::XOF/BCEAO/UEMOA en dur dans la logique applicative — utiliser la devise configurée du tenant (XAF/CEMAC/BEAC par défaut) :"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "✅ Souveraineté CEMAC OK (logique applicative)"
+
+  # ── 3. Invariants OHADA (taux réglementaires en dur interdits dans les RPC) ──
+  ohada-invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Interdiction taux OHADA en dur dans les RPC
+        run: |
+          set +e
+          # On cible l'ARITHMÉTIQUE codée en dur dans la logique (ex. v_brut * 0.025,
+          # '18%'), interdite par NOYAU-NORMATIF §1/§5 : les RPC doivent LIRE les
+          # taux depuis contribution_rates / tax_rates.
+          # On exclut les données de SEED/référence (06-seed-data, 09_seed,
+          # migrations, archive) : y stocker les VALEURS de taux est précisément
+          # l'objectif — ce n'est pas du « code en dur ».
+          MATCHES=$(grep -rEln "\*\s*0\.(018|18|025|16|08)\b|'1[0-9]%'|\"1[0-9]%\"" \
+            --include="*.sql" --include="*.ts" --include="*.tsx" \
+            --exclude-dir=node_modules \
+            . 2>/dev/null \
+            | grep -vE "EdenFin-JASPE-Archive|supabase/migrations/|seed")
+          set -e
+          if [ -n "$MATCHES" ]; then
+            echo "::error::Taux OHADA/CEMAC en dur dans la logique — lire depuis contribution_rates/tax_rates :"
+            echo "$MATCHES"
+            echo "→ NOYAU-NORMATIF-EDENFIN §1 et §5 : aucune constante réglementaire en dur."
+            exit 1
+          fi
+          echo "✅ Invariants OHADA OK — aucun taux en dur dans la logique"
+
+  # ── 4. Migrations SQL : rollback requis sur les nouvelles ──────────
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Vérifier rollback des nouvelles migrations
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "${{ github.base_ref }}" --depth=50
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="${{ github.event.before }}"
+            git cat-file -e "$BASE" 2>/dev/null || { echo "Base introuvable — job neutre ✅"; exit 0; }
+          fi
+          CHANGED=$(git diff --name-only --diff-filter=AM "$BASE"...HEAD -- '*.sql' 2>/dev/null || true)
+          if [ -z "$CHANGED" ]; then
+            echo "Aucune migration nouvelle — job neutre ✅"
+            exit 0
+          fi
+          FAIL=0
+          for f in $CHANGED; do
+            [ -f "$f" ] || continue
+            grep -qi "rollback" "$f" || {
+              echo "::error::$f : section rollback absente (obligatoire pour toute nouvelle migration)"
+              FAIL=1
+            }
+          done
+          [ $FAIL -eq 0 ] && echo "✅ Migrations nouvelles conformes"
+          exit $FAIL
+
+  # ── 5. Tests pgTAP : build du pipeline unifié + RPC (JASPE + gammes) ────────
+  # PostgreSQL 16 + pgTAP installés sur le runner via PGDG. Le runner Ubuntu
+  # fournit déjà un PostgreSQL plus récent sur 5432 : le cluster 16/main obtient
+  # donc un autre port (5433…). On le DÉTECTE dynamiquement (pg_lsclusters) et on
+  # l'utilise partout (libpq : PGHOST/PGPORT/… exportés dans GITHUB_ENV).
+  pgtap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer PostgreSQL 16 + pgTAP + pg_prove (PGDG)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-16 postgresql-16-pgtap \
+            libtap-parser-sourcehandler-pgtap-perl
+
+      - name: Démarrer PostgreSQL (port dynamique) et préparer la base
+        run: |
+          set -eux
+          sudo pg_lsclusters || true
+          # Le runner n'a pas de cluster 16/main (seulement un 18/main) : on le
+          # crée et le démarre explicitement. Il obtient un port libre (5433…),
+          # 5432 étant réservé au cluster 18.
+          sudo pg_createcluster 16 main --start || sudo pg_ctlcluster 16 main start
+          # Port réel attribué au cluster 16/main
+          PORT=$(pg_lsclusters | awk '$1=="16" && $2=="main"{print $3}')
+          test -n "$PORT"
+          {
+            echo "PGHOST=localhost"
+            echo "PGPORT=$PORT"
+            echo "PGUSER=postgres"
+            echo "PGPASSWORD=postgres"
+            echo "PGDATABASE=edenfin_ci"
+          } >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do sudo -u postgres pg_isready -p "$PORT" && break; sleep 1; done
+          sudo -u postgres pg_isready -p "$PORT"
+          sudo -u postgres psql -p "$PORT" -c "ALTER USER postgres PASSWORD 'postgres';"
+          sudo -u postgres createdb -p "$PORT" edenfin_ci
+
+      - name: Construire la base (scripts/db-build.sh — pipeline unifié)
+        env:
+          EDENFIN_DB_SHIM: "1"   # fournit auth.*/rôles/extensions sur PG nu
+          # Base de test : schéma + RPC sans les données de démonstration (03b)
+          # ni les données de référence (06). Les tests pgTAP sont autonomes et
+          # fournissent leurs propres fixtures (cf. tests/rpc/00_setup.sql) ; les
+          # seeds entreraient en conflit de clés avec ces fixtures.
+          EDENFIN_SKIP: "03b-client-seed,06-seed-data"
+        run: |
+          DATABASE_URL="postgres://postgres:postgres@localhost:${PGPORT}/edenfin_ci" \
+            bash scripts/db-build.sh
+
+      - name: Installer l'extension pgTAP dans la base
+        run: psql -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pgtap;"
+
+      - name: Exécuter la suite pgTAP (JASPE T1→T17 + gammes RUBIS/SAPHIR/ONYX)
+        # Suite complète : les 15 tests JASPE hérités (tests/rpc/t01..t15_*.sql,
+        # fonctions RPC T1→T17) remis à niveau sur le schéma courant, PLUS les
+        # tests de gammes (tests/rpc/<gamme>/*_test.sql). Tous autonomes
+        # (BEGIN/ROLLBACK, fixtures propres) sur la base construite sans seeds.
+        run: pg_prove --verbose tests/rpc/*_test.sql tests/rpc/*/*_test.sql

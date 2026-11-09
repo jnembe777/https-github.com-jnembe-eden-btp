@@ -1,0 +1,105 @@
+# .github/workflows/agent-implement.yml — EdenFin v1.0
+
+name: Agent — Implémentation des issues
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: agent-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    if: >
+      (github.event_name == 'issues' && github.event.label.name == 'ready') ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude Code — exécuter la tâche
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true
+          prompt: |
+            Tu es l'agent d'implémentation du dépôt EdenFin. Ta constitution est
+            le fichier CLAUDE.md à la racine ; NOYAU-NORMATIF-EDENFIN.md et
+            STANDARD-UI-TPD.md prévalent sur toute autre spécification.
+
+            STRUCTURE DU DÉPÔT EdenFin :
+            - Stack : Vite + React 18 + TypeScript + Tailwind + Supabase
+            - Sources frontend : src/components/edenfin/, src/routes/, src/hooks/, src/lib/
+            - Scripts SQL : EdenFin-JASPE-Archive-Complete/02-migrations-sql/
+            - Composants établis (NE PAS réécrire) : SmartGrid, EntityFormDrawer,
+              RPCPanel, JournalEntryForm, DataTable, KpiGrid
+            - Pour découvrir la structure : Bash("find src -maxdepth 3 -type f | head -40")
+
+            CONTRAINTES TECHNIQUES :
+            - N'utilise JAMAIS l'outil Workflow ni ScheduleWakeup (asynchrones,
+              incompatibles GitHub Actions). Boucles séquentielles uniquement.
+            - Aucune constante OHADA en dur (taux, codes comptables) — lire depuis
+              les tables de paramétrage (NOYAU-NORMATIF-EDENFIN §1 et §5).
+            - Zéro DELETE sur écritures POSTED, bulletins CLOSED, périodes LOCKED.
+            - Formatters obligatoires : formatXAF(), formatDate(), formatPeriod().
+            - Toute nouvelle table Supabase a sa policy RLS company_id avant merge.
+
+            TÂCHE : implémenter l'issue #${{ github.event.issue.number }}
+            « ${{ github.event.issue.title }} ».
+
+            PROTOCOLE :
+            1. Lis CLAUDE.md, NOYAU-NORMATIF-EDENFIN.md, STANDARD-UI-TPD.md.
+            2. gh issue view ${{ github.event.issue.number }} --comments
+            3. Contradiction normative → normative-conflict, retire ready, stop.
+            4. Décision métier manquante → business-question, retire ready, stop.
+            5. Implémente :
+               git checkout -b feat/jaspe-<slug>
+               [éditions]
+               git add -A && git commit -m "feat(jaspe): message"
+               git push origin HEAD
+            6. PR :
+               gh pr create --title "feat(jaspe): titre" --body "description + DoD"
+               Si auth/RLS/migrations : gh pr edit --add-label "human-review-required"
+            7. gh issue edit ${{ github.event.issue.number }} --add-label "agent-done"
+               gh issue edit ${{ github.event.issue.number }} --remove-label "ready"
+               Ne merge JAMAIS.
+          claude_args: |
+            --max-turns 80
+            --model claude-sonnet-4-6
+            --dangerously-skip-permissions
+
+  notify-escalation:
+    needs: implement
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Marquer l'issue bloquée
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              ...context.repo,
+              issue_number: context.payload.issue.number,
+              labels: ['blocked']
+            });
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.issue.number,
+              body: '⚠️ L\'agent a échoué. Voir les logs Actions. Label `blocked` posé.'
+            });

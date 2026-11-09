@@ -1,0 +1,69 @@
+# ============================================================================
+# EdenFin — Manifeste de build base de données (pipeline unifié)
+# ----------------------------------------------------------------------------
+# Ordre canonique d'application des scripts SQL pour reconstruire la base
+# complète à partir de zéro. Utilisé par scripts/db-build.sh (local / CI) et
+# sert de source de vérité unique pour « de quoi est faite la base ».
+#
+# Règles :
+#   - une entrée par ligne, chemin relatif à la racine du dépôt ;
+#   - lignes vides et lignes commençant par # ignorées ;
+#   - l'ordre de ce fichier EST l'ordre d'exécution (dépendances incluses).
+#
+# Le shim Supabase (db/shim/00_supabase_compat.sql) n'est PAS listé ici : il
+# est appliqué séparément par le runner uniquement en local/CI (EDENFIN_DB_SHIM=1),
+# jamais sur une base Supabase réelle qui fournit déjà auth.*/rôles/extensions.
+# ============================================================================
+
+# ── Socle JASPE (TPE) — schémas, référentiels, métier, RPC T1→T17, vues, seed ─
+database/jaspe/01-schemas-and-rbac.sql
+database/jaspe/02-common-tables.sql
+database/jaspe/03-client-tables.sql
+# Données de démonstration client_demo (exercices/périodes/journaux) — séparées
+# du schéma pour les tests pgTAP ; sautées en test via EDENFIN_SKIP.
+database/jaspe/03b-client-seed.sql
+database/jaspe/04-rpc-functions.sql
+database/jaspe/05-views-and-policies.sql
+database/jaspe/06-seed-data.sql
+
+# ── Compléments JASPE livrés en migrations incrémentales ─────────────────────
+# Paie T6/T7 : rpc_validate_payslip + rpc_generate_payroll_entries
+supabase/migrations/20260725000001_paie-rpc-t6-t7.sql
+# Journalisation : audit_log.generate_action
+supabase/migrations/20260725100000_audit-log-generate-action.sql
+
+# ── Gamme RUBIS (PME) — multi-sociétés, analytique, facturation ──────────────
+rubis/01_rubis_multicompany_schema.sql
+rubis/02_rubis_analytical_rpc.sql
+rubis/03_rubis_invoicing.sql
+
+# ── Gamme SAPHIR (ETI) — multi-devises, workflow, IFRS, consolidation, BI ────
+# Build vérifié de bout en bout (Sprint 1). Hérite de JASPE+RUBIS.
+saphir/01_saphir_multicurrency.sql
+saphir/02_saphir_workflow.sql
+saphir/03_saphir_ifrs.sql
+saphir/04_saphir_consolidation.sql
+saphir/05_saphir_bi.sql
+
+# ── Ponts d'intégration ONYX (requis avant onyx/*) ───────────────────────────
+# Réconcilient les contrats de schéma entre gammes sans dupliquer la donnée.
+db/integration/01_entities_bridge.sql
+db/integration/02_onyx_currencies_seed.sql
+db/integration/03_bank_accounts_bridge.sql
+
+# ── Gamme ONYX (GE / secteur public) — modules 01→03 activés (Sprint 2) ───────
+# Déploient de bout en bout sur la base intégrée : multi-pays, trésorerie,
+# prix de transfert.
+onyx/01_onyx_multicountry.sql
+onyx/02_onyx_treasury.sql
+onyx/03_onyx_transfer_pricing.sql
+
+# ── ONYX 04→07 — activés (Sprint 3) ──────────────────────────────────────────
+# Modèle de tenant/entité harmonisé sur le socle BIGINT (voir SPRINT3_ONYX.md) :
+# tenant_id/fiscal_year_id UUID -> BIGINT ; common.tenants -> sys.tenants ;
+# common.fiscal_years -> client_demo.fiscal_exercises ;
+# saphir.group_entities -> sys.tenant_entities.
+onyx/04_onyx_consolidation.sql
+onyx/05_onyx_public_sector.sql
+onyx/06_onyx_regulatory.sql
+onyx/07_onyx_integration.sql

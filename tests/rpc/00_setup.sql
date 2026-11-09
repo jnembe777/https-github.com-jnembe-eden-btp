@@ -1,0 +1,53 @@
+-- ============================================================================
+-- EDENFIN JASPE — Harness pgTAP : initialisation et prérequis
+-- Issue #7 · P1 · Tests unitaires pgTAP pour les 13 fonctions RPC T1→T13
+-- ============================================================================
+-- Ce fichier documente le protocole d'exécution des tests.
+-- Chaque fichier tXX_*.sql est AUTONOME (BEGIN/ROLLBACK).
+-- Il n'est PAS nécessaire d'exécuter ce fichier avant les tests.
+-- ============================================================================
+--
+-- PRÉREQUIS D'EXÉCUTION :
+--   1. PostgreSQL avec pgTAP installé :
+--        CREATE EXTENSION IF NOT EXISTS pgtap;
+--   2. Schémas sys, common, client_demo créés (scripts 01→03)
+--   3. Fonctions RPC déployées (scripts 04, migrations paie T6/T7)
+--
+-- EXÉCUTION LOCALE :
+--   pg_prove -U postgres -d edenfin_dev tests/rpc/
+--   — ou —
+--   npm run test:pgtap
+--
+-- EXÉCUTION SUPABASE (via CLI) :
+--   supabase db test --db-url "$SUPABASE_DB_URL"
+--
+-- STRUCTURE DES FICHIERS :
+--   t01_create_journal_entry_test.sql    MCT T1  rpc_create_journal_entry
+--   t02_validate_journal_entry_test.sql  MCT T1b rpc_validate_journal_entry
+--   t03_auto_reconcile_bank_test.sql     MCT T2  rpc_auto_reconcile_bank
+--   t04_auto_lettrage_test.sql           MCT T3  rpc_auto_lettrage
+--   t05_close_fiscal_period_test.sql     MCT T4  rpc_close_fiscal_period
+--   t06_calculate_payroll_test.sql       MCT T5  rpc_calculate_payroll
+--   t07_validate_payslip_test.sql        MCT T6  rpc_validate_payslip
+--   t08_generate_payroll_entries_test.sql MCT T7 rpc_generate_payroll_entries
+--   t09_cash_forecast_test.sql           MCT T8  rpc_cash_forecast
+--   t10_generate_tva_declaration_test.sql MCT T10 rpc_generate_tva_declaration
+--   t11_financial_ratios_test.sql        MCT T12 rpc_financial_ratios
+--   t12_generate_depreciation_test.sql   MCT T14 rpc_generate_depreciation
+--   t13_dispose_asset_test.sql           MCT T15 rpc_dispose_asset
+--   t14_trial_balance_test.sql           MCT T16 rpc_trial_balance
+--   t15_dashboard_kpi_test.sql           MCT T17 rpc_dashboard_kpi
+--
+-- INVARIANTS TESTÉS (NOYAU-NORMATIF-EDENFIN) :
+--   §2 - Équilibre Débit=Crédit (T1)
+--   §2 - Irréversibilité DRAFT→POSTED (T1b)
+--   §2 - Blocage si période fermée (T4, T5)
+--   §1 - Taux cotisations depuis contribution_rates (T5)
+--   §3 - Workflow d'état bulletins DRAFT→VALIDATED (T6)
+--   §5 - Taux TVA depuis common.tax_codes (T10)
+-- ============================================================================
+
+-- Vérification que pgTAP est installé (à exécuter manuellement si besoin)
+-- CREATE EXTENSION IF NOT EXISTS pgtap;
+
+SELECT 'EdenFin pgTAP harness — exécutez pg_prove -r tests/rpc/' AS info;
